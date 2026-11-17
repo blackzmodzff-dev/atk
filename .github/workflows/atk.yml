@@ -1,0 +1,85 @@
+name: atk
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: atk
+  cancel-in-progress: false
+
+jobs:
+  bater:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Bater na API
+        run: |
+          cat > atk.js << 'EOF'
+          const ALVO = "https://api.nafavelaturismo.com.br";
+          const CENTRAL = "https://central-nafavela.pages.dev";
+          const UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
+          // rotas que dao MAIS trabalho no servidor deles (repetidas de proposito)
+          // tours e a rota MAIS PESADA deles (3x as outras): concentra nela
+          const ROTAS = ["/api/guide/v2/tours", "/api/guide/v2/tours", "/api/guide/v2/tours", "/api/guide/v2/tours", "/api/guide/v2/routes", "/api/guide/v2/charges"];
+
+          async function cfg() {
+            try {
+              const r = await fetch(CENTRAL + "/_gh", { headers: { "user-agent": UA } });
+              return await r.json();
+            } catch { return { rps: 0, seg: 270 }; }
+          }
+
+          (async () => {
+            const c = await cfg();
+            const rps = c.rps || 0;
+            const seg = c.seg || 270;
+            if (!c.ligado || !rps) { console.log("FORA DO HORARIO (ligado=" + c.ligado + ")"); return; }
+            const tok = c.token;
+
+            let enviei = 0, ok = 0, e429 = 0, outras = 0;
+            const t0 = Date.now();
+            let i = 0;
+            console.log("job batendo: " + rps + "/s por " + seg + "s");
+
+            while ((Date.now() - t0) / 1000 < seg) {
+              const lote = [];
+              for (let k = 0; k < 5 && ((Date.now() - t0) / 1000 < seg); k++) {
+                const rota = ROTAS[i % ROTAS.length];
+                const h = { "user-agent": UA, accept: "application/json", "cache-control": "no-cache" };
+                if (tok) h.authorization = "Bearer " + tok;
+                lote.push(fetch(ALVO + rota + "?_gh=" + Date.now() + "-" + i, { headers: h })
+                  .then(function (r) {
+                    enviei++;
+                    if (r.status === 200) ok++; else if (r.status === 429) e429++; else outras++;
+                    return r.text();
+                  }).catch(function () { enviei++; outras++; }));
+                i++;
+              }
+              await Promise.all(lote);
+              await new Promise(function (r) { setTimeout(r, 1000 / rps * 5); });
+            }
+            console.log("FIM | enviados=" + enviei + " ok=" + ok + " 429=" + e429 + " outros=" + outras);
+          })();
+          EOF
+          node atk.js
+
+      - name: Manter ativo
+        if: matrix.job == 1
+        run: |
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > ultimo.txt
+          git config user.name "atk" && git config user.email "atk@atk.local" || true
+          git add ultimo.txt && git commit -m "atk" || true
+          git push || true
